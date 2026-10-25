@@ -54,6 +54,14 @@ out=$(compose "$stock") || fail "a non-Latin layout sources cleanly"
   fail "a non-Latin layout stays out of the image" "$out"
 pass "a non-Latin layout keeps the prompt on the US map"
 
+inherited="base asahi udev autodetect microcode modconf kms keyboard keymap consolefont block filesystems fsck"
+printf 'KEYMAP=dk-latin1\nXKBLAYOUT=dk\n' >"$tmp/vconsole.conf"
+out=$(compose "$inherited") || fail "an inherited asahi line sources cleanly"
+[[ $(sed -n 's/^HOOKS=//p' <<<"$out") == \
+  "base asahi systemd plymouth autodetect microcode modconf kms keyboard sd-vconsole block omarchy-vendorfw omarchy-mac-encrypt sd-encrypt filesystems fsck" ]] ||
+  fail "an inherited asahi hook does not hide the systemd vendor firmware loader" "$out"
+pass "an inherited asahi line keeps firmware loading after the platform drop-ins convert it"
+
 legacy="base udev plymouth autodetect microcode modconf kms keyboard keymap consolefont block encrypt asahi filesystems fsck"
 printf 'KEYMAP=dk-latin1\nXKBLAYOUT=dk\n' >"$tmp/vconsole.conf"
 out=$(compose "$legacy") || fail "a legacy line sources cleanly"
