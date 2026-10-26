@@ -174,6 +174,14 @@ OMARCHY_MAC_ROOT=$stage "$stage/usr/lib/omarchy/mac/setup-user" || fail 'the set
 [[ -L $HOME/.config/systemd/user/graphical-session.target.wants/omarchy-asahi-mic.service ]] || fail 'the setup-user entrypoint sets up the microphone'
 OMARCHY_MAC_ROOT=$stage "$stage/usr/lib/omarchy/mac/setup-system" image-first-boot || fail 'the setup-system entrypoint runs system setup'
 ! grep -q '^wrap' "$CALLS" || fail 'a staging root skips the Electron launchers'
+# Resolve the cleared environment's account through the fixture, never the
+# account running this test: its real home must not become a setup target.
+cat >"$work/bin/getent" <<'STUB'
+#!/bin/bash
+[[ $1 == "passwd" && $2 == "$EUID" ]] || exit 2
+printf 'fixture:x:%s:%s::%s:/bin/bash\n' "$EUID" "$(id -g)" "$(dirname "$CALLS")/home"
+STUB
+chmod +x "$work/bin/getent"
 env -i PATH="$PATH" CALLS="$CALLS" OMARCHY_MAC_ROOT="$stage" "$stage/usr/lib/omarchy/mac/setup-user" ||
   fail 'the setup-user entrypoint finds the home of a caller that emptied its environment'
 grep -q '^systemctl --root=.* enable omarchy-wifi-resume-fix.service' "$CALLS" || fail 'the setup-system entrypoint sets up the Mac services' "$(cat "$CALLS")"
