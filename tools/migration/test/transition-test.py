@@ -1,0 +1,274 @@
+#!/usr/bin/python3
+import base64
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from unittest import mock
+import importlib.util
+from pathlib import Path
+import tempfile
+import unittest
+
+SPEC = importlib.util.spec_from_file_location(
+    "transition", Path(__file__).parents[1] / "touchid-transition.py"
+)
+T = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(T)
+
+
+def content(data, uid, gid):
+    return dict(
+        kind="file",
+        data=base64.b64encode(data).decode(),
+        sha256=hashlib.sha256(data).hexdigest(),
+        mode=0o644,
+        uid=uid,
+        gid=gid,
+    )
+
+
+class TransitionTests(unittest.TestCase):
+    def fixture(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        (root / "etc/pam.d").mkdir(parents=True)
+        (root / "checkpoints").mkdir()
+        path = root / "etc/pam.d/test"
+        path.write_bytes(b"old\n")
+        path.chmod(0o644)
+        before = T.snapshot(path)
+        plan = dict(
+            schema=1,
+            files=[
+                dict(
+                    path="/etc/pam.d/test",
+                    before={k: v for k, v in before.items() if k != "data"},
+                    after=content(b"new\n", before["uid"], before["gid"]),
+                ),
+                dict(
+                    path="/etc/omarchy-mac/touchid-on",
+                    before=dict(kind="absent"),
+                    after=content(b"consent\n", before["uid"], before["gid"]),
+                ),
+            ],
+        )
+        return root, plan, root / "checkpoints/run"
+
+    def test_existing_consent_needs_exact_healthy_restored_state(self):
+        plan = {
+            "phase": "preserve-existing-consent",
+            "files": [
+                {"path": p, "before": {"kind": "absent"}}
+                for p in (
+                    "/etc/omarchy-mac/touchid-on",
+                    "/etc/modprobe.d/omarchy-mac-touchid.conf",
+                )
+            ],
+        }
+        facts = dict(
+            host_store="ready",
+            xart="enabled",
+            sensor="online",
+            touchid="ready",
+            sensor_attach="attached",
+            restore="restored",
+            matching="usable",
+            refusals=0,
+        )
+        report = dict(action="unsupported", facts=facts, node_present=True)
+        self.assertTrue(T.ready_for_transition(plan, report))
+        for key in facts:
+            changed = dict(facts)
+            changed.pop(key)
+            self.assertFalse(
+                T.ready_for_transition(plan, dict(action="unsupported", facts=changed, node_present=True))
+            )
+        for action in (
+            "preserve-state",
+            "ownership-review",
+            "storage-policy-review",
+            "wait",
+        ):
+            self.assertFalse(
+                T.ready_for_transition(plan, dict(action=action, facts=facts, node_present=True))
+            )
+        for node in (False, None):
+            self.assertFalse(T.ready_for_transition(plan, dict(action="unsupported", facts=facts, node_present=node)))
+        plan["files"][0]["path"] = "/etc/pam.d/sddm"
+        self.assertFalse(T.ready_for_transition(plan, report))
+        self.assertFalse(T.ready_for_transition({}, report))
+
+    def test_incomplete_or_extra_before_metadata_refused_before_apply(self):
+        for missing in ("sha256", "mode", "uid", "gid"):
+            root, plan, cp = self.fixture()
+            del plan["files"][0]["before"][missing]
+            with self.assertRaisesRegex(RuntimeError, "metadata"):
+                T.validate_plan(plan)
+            with self.assertRaisesRegex(RuntimeError, "metadata"):
+                T.apply(root, plan, cp)
+            self.assertEqual((root / "etc/pam.d/test").read_bytes(), b"old\n")
+            self.assertFalse(cp.exists())
+        root, plan, cp = self.fixture()
+        plan["files"][0]["before"]["unexpected"] = True
+        with self.assertRaisesRegex(RuntimeError, "metadata"):
+            T.apply(root, plan, cp)
+        self.assertFalse(cp.exists())
+
+    def test_invalid_after_rejected_by_check_and_apply_before_any_write(self):
+        variants = [lambda a: a.update(extra=True), lambda a: a.update(data="bad!"),
+                    lambda a: a.update(mode=True), lambda a: a.update(uid=-1),
+                    lambda a: a.update(sha256="0" * 64),
+                    lambda a: a.update(content(b"x" * (1024 * 1024 + 1), a["uid"], a["gid"]))]
+        for change in variants:
+            root, plan, cp = self.fixture()
+            change(plan["files"][0]["after"])
+            plan_path = root / "plan.json"
+            plan_path.write_text(json.dumps(plan))
+            for operation in ("check", "apply"):
+                result = subprocess.run([sys.executable, str(Path(T.__file__)), operation, "--root", str(root),
+                                         "--plan", str(plan_path), "--checkpoint", str(cp)], capture_output=True)
+                self.assertNotEqual(result.returncode, 0, operation)
+                self.assertEqual((root / "etc/pam.d/test").read_bytes(), b"old\n")
+                self.assertFalse(cp.exists())
+        root, plan, cp = self.fixture()
+        plan["files"][0]["after"] = dict(kind="absent", extra=True)
+        with self.assertRaises(RuntimeError): T.apply(root, plan, cp)
+        self.assertEqual((root / "etc/pam.d/test").read_bytes(), b"old\n")
+
+    def test_rollback_restores_special_mode_after_chown(self):
+        root, plan, cp = self.fixture()
+        path = root / "etc/pam.d/test"
+        path.chmod(0o6755)
+        before = T.snapshot(path)
+        plan["files"][0]["before"] = {k: v for k, v in before.items() if k != "data"}
+        with self.assertRaisesRegex(RuntimeError, "injected"):
+            T.apply(root, plan, cp, fail_after=0)
+        self.assertEqual(T.snapshot(path), before)
+        # Emulate root to verify that ownership is set before the final mode.
+        calls = []
+        actual_chmod = os.fchmod
+        with mock.patch.object(T.os, "geteuid", return_value=0), \
+             mock.patch.object(T.os, "fchown", side_effect=lambda *args: calls.append("chown")), \
+             mock.patch.object(T.os, "fchmod", side_effect=lambda fd, mode: (calls.append("chmod"), actual_chmod(fd, mode))):
+            T.put(path, before)
+        self.assertEqual(calls, ["chown", "chmod"])
+        self.assertEqual(T.snapshot(path), before)
+
+    def test_snapshot_rejects_changed_metadata_on_open(self):
+        root, _, _ = self.fixture()
+        path = root / "etc/pam.d/test"
+        actual = os.fstat
+        def changed(fd):
+            value = list(actual(fd))
+            value[0] ^= 0o100
+            return os.stat_result(value)
+        with mock.patch.object(T.os, "fstat", side_effect=changed):
+            with self.assertRaisesRegex(RuntimeError, "metadata"):
+                T.snapshot(path)
+
+    def test_apply_and_exact_inverse(self):
+        root, plan, cp = self.fixture()
+        T.apply(root, plan, cp)
+        self.assertEqual((root / "etc/pam.d/test").read_bytes(), b"new\n")
+        T.rollback(root, cp)
+        self.assertEqual((root / "etc/pam.d/test").read_bytes(), b"old\n")
+        self.assertFalse((root / "etc/omarchy-mac").exists())
+
+    def test_fault_after_each_replacement_rolls_back(self):
+        for at in (0, 1):
+            root, plan, cp = self.fixture()
+            with self.assertRaisesRegex(RuntimeError, "injected"):
+                T.apply(root, plan, cp, fail_after=at)
+            self.assertEqual((root / "etc/pam.d/test").read_bytes(), b"old\n")
+            self.assertFalse((root / "etc/omarchy-mac/touchid-on").exists())
+
+    def test_unwritable_untouched_later_row_does_not_prevent_rollback(self):
+        root, plan, cp = self.fixture()
+        later = root / "etc/omarchy-mac/touchid-on"
+        later.parent.mkdir()
+        later.write_text("unchanged")
+        before = T.snapshot(later)
+        plan["files"][1]["before"] = {k: v for k, v in before.items() if k != "data"}
+        original_put = T.put
+        calls = []
+        def fail_later(path, row):
+            calls.append(path)
+            if path == later: raise PermissionError("injected unwritable destination")
+            return original_put(path, row)
+        with mock.patch.object(T, "put", side_effect=fail_later):
+            with self.assertRaises(PermissionError): T.apply(root, plan, cp)
+        self.assertEqual(T.snapshot(later), before)
+        self.assertEqual((root / "etc/pam.d/test").read_bytes(), b"old\n")
+        self.assertEqual(calls.count(later), 1)
+
+    def test_changed_late_destination_changes_nothing(self):
+        root, plan, cp = self.fixture()
+        (root / "etc/omarchy-mac").mkdir()
+        (root / "etc/omarchy-mac/touchid-on").write_text("admin")
+        with self.assertRaisesRegex(RuntimeError, "preflight"):
+            T.apply(root, plan, cp)
+        self.assertEqual((root / "etc/pam.d/test").read_bytes(), b"old\n")
+        self.assertFalse(cp.exists())
+
+    def test_rollback_preserves_administrator_edits(self):
+        root, plan, cp = self.fixture()
+        T.apply(root, plan, cp)
+        (root / "etc/pam.d/test").write_text("admin")
+        with self.assertRaisesRegex(RuntimeError, "changed"):
+            T.rollback(root, cp)
+        self.assertEqual((root / "etc/pam.d/test").read_text(), "admin")
+        self.assertTrue((root / "etc/omarchy-mac/touchid-on").exists())
+
+    def test_symlink_parent_is_refused(self):
+        root, plan, cp = self.fixture()
+        (root / "etc/omarchy-mac").symlink_to(
+            root / "etc/pam.d", target_is_directory=True
+        )
+        with self.assertRaisesRegex(RuntimeError, "parent"):
+            T.apply(root, plan, cp)
+        self.assertEqual((root / "etc/pam.d/test").read_bytes(), b"old\n")
+
+    def test_duplicate_path_or_bad_payload_is_refused(self):
+        for duplicate in (False, True):
+            root, plan, cp = self.fixture()
+            if duplicate:
+                plan["files"].append(plan["files"][0])
+            else:
+                plan["files"][1]["after"]["sha256"] = "0" * 64
+            with self.assertRaises(RuntimeError):
+                T.apply(root, plan, cp)
+            self.assertFalse(cp.exists())
+
+    def test_enrollment_and_traversal_are_never_targets(self):
+        for name in (
+            "/var/lib/fprint/data",
+            "/var/lib/aurora-sep-keybag.bin",
+            "/etc/pam.d/../../var/lib/fprint/data",
+        ):
+            root, plan, cp = self.fixture()
+            plan["files"][1]["path"] = name
+            with self.assertRaises(RuntimeError):
+                T.apply(root, plan, cp)
+            self.assertFalse(cp.exists())
+
+    def test_removed_symlink_is_restored_as_link(self):
+        root, plan, cp = self.fixture()
+        p = root / "etc/pam.d/test"
+        p.unlink()
+        p.symlink_to("original")
+        plan["files"] = [
+            dict(
+                path="/etc/pam.d/test", before=T.snapshot(p), after=dict(kind="absent")
+            )
+        ]
+        T.apply(root, plan, cp)
+        self.assertFalse(p.is_symlink())
+        T.rollback(root, cp)
+        self.assertEqual(p.readlink(), Path("original"))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
