@@ -226,6 +226,12 @@ def apply(root, plan, checkpoint, fail_after=None):
     checkpoint.mkdir(mode=0o700, parents=False, exist_ok=False)
     journal = dict(schema=1, status="PREPARED", files=rows, created_directories=[])
     atomic_json(checkpoint / "journal.json", journal)
+    # Publish the checkpoint path, including ancestors created by the CLI,
+    # before any configuration replacement can become durable.
+    ancestor = checkpoint.absolute()
+    while ancestor != ancestor.parent:
+        sync_parent(ancestor)
+        ancestor = ancestor.parent
     try:
         for index, row in enumerate(rows):
             path = path_at(root, row["path"])

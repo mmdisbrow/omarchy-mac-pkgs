@@ -177,6 +177,56 @@ class TransitionTests(unittest.TestCase):
         self.assertEqual((root / "etc/pam.d/test").read_bytes(), b"old\n")
         self.assertFalse((root / "etc/omarchy-mac").exists())
 
+    def test_checkpoint_ancestors_are_durable_before_any_replacement(self):
+        root, plan, _ = self.fixture()
+        cp = root / "checkpoints/new/nested/run"
+        cp.parent.mkdir(parents=True)
+        parents = [cp.parent, cp.parent.parent, root / "checkpoints", root]
+        required = {(p.stat().st_dev, p.stat().st_ino) for p in parents}
+        synced = set()
+        real_sync, real_put = T.os.fsync, T.put
+
+        def sync(fd):
+            info = os.fstat(fd)
+            result = real_sync(fd)
+            synced.add((info.st_dev, info.st_ino))
+            return result
+
+        def replace(path, row):
+            self.assertTrue(required <= synced, "checkpoint path is not durable")
+            return real_put(path, row)
+
+        with mock.patch.object(T.os, "fsync", side_effect=sync), \
+             mock.patch.object(T, "put", side_effect=replace):
+            T.apply(root, plan, cp)
+        self.assertEqual((root / "etc/pam.d/test").read_bytes(), b"new\n")
+        T.rollback(root, cp)
+        self.assertEqual((root / "etc/pam.d/test").read_bytes(), b"old\n")
+
+    def test_checkpoint_parent_sync_failure_prevents_all_replacements(self):
+        for level in range(4):
+            root, plan, _ = self.fixture()
+            cp = root / "checkpoints/new/nested/run"
+            cp.parent.mkdir(parents=True)
+            parent = [cp.parent, cp.parent.parent, root / "checkpoints", root][level]
+            info = parent.stat()
+            failing_inode = (info.st_dev, info.st_ino)
+            real_sync = T.os.fsync
+
+            def fail(fd):
+                info = os.fstat(fd)
+                if (info.st_dev, info.st_ino) == failing_inode:
+                    raise OSError("injected checkpoint publication failure")
+                return real_sync(fd)
+
+            with mock.patch.object(T.os, "fsync", side_effect=fail), \
+                 mock.patch.object(T, "put", wraps=T.put) as replace:
+                with self.assertRaisesRegex(OSError, "checkpoint publication"):
+                    T.apply(root, plan, cp)
+                replace.assert_not_called()
+            self.assertEqual((root / "etc/pam.d/test").read_bytes(), b"old\n")
+            self.assertFalse((root / "etc/omarchy-mac/touchid-on").exists())
+
     def test_fault_after_each_replacement_rolls_back(self):
         for at in (0, 1):
             root, plan, cp = self.fixture()
