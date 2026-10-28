@@ -165,11 +165,17 @@ pass 'restore ignores unsupported saved values, missing batteries and non-Apple 
 # Installing the rule on a running machine produces no battery add event.
 # Exercise the actual hook command against the existing fixture device.
 hook="$stage/usr/share/libalpm/hooks/90-omarchy-mac-battery-charge-limit.hook"
-hook_command=:
-if [[ -f $hook ]]; then
-  hook_command=$(sed -n "s/^Exec = \/usr\/bin\/sh -c '\(.*\)'$/\1/p" "$hook")
-  hook_command=${hook_command//\/usr\/lib\/omarchy-mac\/battery-charge-limit-restore/$restore}
-fi
+[[ -f $hook ]] || fail 'the battery restoration pacman hook is staged'
+grep -Fxq '[Trigger]' "$hook" && grep -Fxq 'Type = Path' "$hook" &&
+  grep -Fxq 'Operation = Install' "$hook" && grep -Fxq 'Operation = Upgrade' "$hook" &&
+  grep -Fxq 'Target = usr/lib/udev/rules.d/94-omarchy-mac-battery-charge-limit.rules' "$hook" &&
+  grep -Fxq '[Action]' "$hook" && grep -Fxq 'When = PostTransaction' "$hook" ||
+  fail 'the hook runs after installing or upgrading the battery rule'
+target=$(sed -n 's/^Target = //p' "$hook")
+[[ -f $stage/$target && $stage/$target == "$rule" ]] || fail 'the hook targets the staged battery rule'
+hook_command=$(sed -n "s/^Exec = \/usr\/bin\/sh -c '\(.*\)'$/\1/p" "$hook")
+[[ -n $hook_command ]] || fail 'the hook has an executable restore action'
+hook_command=${hook_command//\/usr\/lib\/omarchy-mac\/battery-charge-limit-restore/$restore}
 cat >"$work/bin/systemd-detect-virt" <<'STUB'
 #!/bin/bash
 [[ ${IN_CHROOT:-0} == 1 ]]
