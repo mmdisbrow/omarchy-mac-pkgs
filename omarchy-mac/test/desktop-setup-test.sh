@@ -182,8 +182,14 @@ cat >"$work/bin/getent" <<'STUB'
 printf 'fixture:x:%s:%s::%s:/bin/bash\n' "$EUID" "$(id -g)" "$(dirname "$CALLS")/home"
 STUB
 chmod +x "$work/bin/getent"
+microphone_link="$HOME/.config/systemd/user/graphical-session.target.wants/omarchy-asahi-mic.service"
+rm -f "$microphone_link" "$HOME/.local/state/omarchy/mac-microphone-configured"
 env -i PATH="$PATH" CALLS="$CALLS" OMARCHY_MAC_ROOT="$stage" "$stage/usr/lib/omarchy/mac/setup-user" ||
   fail 'the setup-user entrypoint finds the home of a caller that emptied its environment'
+[[ -L $microphone_link && $(readlink "$microphone_link") == "/usr/lib/systemd/user/omarchy-asahi-mic.service" ]] ||
+  fail 'cleared-environment setup recreates the microphone link in the fixture home'
+[[ -f $HOME/.local/state/omarchy/mac-microphone-configured ]] ||
+  fail 'cleared-environment setup records microphone configuration in the fixture home'
 grep -q '^systemctl --root=.* enable omarchy-wifi-resume-fix.service' "$CALLS" || fail 'the setup-system entrypoint sets up the Mac services' "$(cat "$CALLS")"
 status=0
 "$stage/usr/lib/omarchy/mac/setup-system" first-boot 2>/dev/null || status=$?

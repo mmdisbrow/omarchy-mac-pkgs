@@ -1,4 +1,4 @@
 # The Omarchy runtime CI tests the packages against: a repository and a full commit.
-# Move it deliberately, like a recipe pin. The fixtures below follow this
-# runtime's repository list and factory-reset staging contract.
+# Move it deliberately, like a recipe pin. At 2fca7fe0, upstream quattro's
+# "Update translations (#16604)"; fixtures follow its repositories and reset.
 omacom/omarchy 2fca7fe073e5ef71cd066ddb0d2294ad067deaf5
