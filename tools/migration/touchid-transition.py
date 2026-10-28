@@ -293,6 +293,19 @@ def ready_for_transition(plan, result):
     )
 
 
+def acquire_transition_lock(root):
+    # One file per target root, so a second checkpoint cannot pass it.
+    path = root / "run/omarchy-mac/touchid-transition.lock"
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def safe_checkpoint_parent(path):
     require(
         path.is_absolute() and str(path) == str(path.resolve()),
@@ -364,13 +377,11 @@ def main():
             )
         print("Configuration and replacement prerequisites match; nothing activated.")
         return
-    args.checkpoint.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if root == Path("/"):
-        safe_checkpoint_parent(args.checkpoint.parent)
-    lock = args.checkpoint.parent / ".touchid-transition.lock"
-    fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "w") as stream:
-        fcntl.flock(stream, fcntl.LOCK_EX)
+    fd = acquire_transition_lock(root)
+    with os.fdopen(fd, "w"):
+        args.checkpoint.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if root == Path("/"):
+            safe_checkpoint_parent(args.checkpoint.parent)
         if args.operation == "rollback":
             rollback(root, args.checkpoint)
         elif args.operation == "apply":

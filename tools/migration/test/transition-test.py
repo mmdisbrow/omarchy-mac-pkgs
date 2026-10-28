@@ -386,6 +386,72 @@ class TransitionTests(unittest.TestCase):
         self.assertEqual((root / "etc/pam.d/test").read_bytes(), b"old\n")
         self.assertFalse((root / "etc/omarchy-mac").exists())
 
+    def test_distinct_checkpoint_parents_use_the_target_root_lock(self):
+        root, plan, cp = self.fixture()
+        plan_path = root / "plan.json"
+        plan_path.write_text(json.dumps(plan))
+        lock = root / "run/omarchy-mac/touchid-transition.lock"
+        lock.parent.mkdir(parents=True)
+        lock.mkdir()
+        script = str(Path(T.__file__))
+        for checkpoint in (cp, root / "elsewhere/run"):
+            result = subprocess.run(
+                [sys.executable, script, "apply", "--root", str(root), "--plan", str(plan_path),
+                 "--checkpoint", str(checkpoint)],
+                capture_output=True, text=True,
+            )
+            self.assertNotEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((root / "etc/pam.d/test").read_bytes(), b"old\n")
+            self.assertFalse((root / "etc/omarchy-mac/touchid-on").exists())
+            self.assertFalse(checkpoint.exists())
+        lock.rmdir()
+        result = subprocess.run(
+            [sys.executable, script, "apply", "--root", str(root), "--plan", str(plan_path),
+             "--checkpoint", str(cp)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(lock.is_file())
+        self.assertEqual((root / "etc/pam.d/test").read_bytes(), b"new\n")
+
+    def test_another_target_root_is_not_blocked_by_this_lock(self):
+        root, plan, _ = self.fixture()
+        fd = T.acquire_transition_lock(root)
+        self.addCleanup(os.close, fd)
+        probe = subprocess.run(
+            [sys.executable, "-c", LOCK_PROBE, str(root / "run/omarchy-mac/touchid-transition.lock")],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(probe.stdout.strip(), "busy", probe.stderr)
+        other, other_plan, other_cp = self.fixture()
+        other_plan_path = other / "plan.json"
+        other_plan_path.write_text(json.dumps(other_plan))
+        result = subprocess.run(
+            [sys.executable, str(Path(T.__file__)), "apply", "--root", str(other),
+             "--plan", str(other_plan_path), "--checkpoint", str(other_cp)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((other / "etc/pam.d/test").read_bytes(), b"new\n")
+        self.assertEqual((root / "etc/pam.d/test").read_bytes(), b"old\n")
+        free = subprocess.run(
+            [sys.executable, "-c", LOCK_PROBE, str(other / "run/omarchy-mac/touchid-transition.lock")],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(free.stdout.strip(), "free", free.stderr)
+
+
+LOCK_PROBE = """
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    print("busy")
+else:
+    print("free")
+"""
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
