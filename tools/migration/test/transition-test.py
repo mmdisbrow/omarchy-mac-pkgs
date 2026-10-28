@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 from unittest import mock
@@ -318,6 +319,72 @@ class TransitionTests(unittest.TestCase):
         self.assertFalse(p.is_symlink())
         T.rollback(root, cp)
         self.assertEqual(p.readlink(), Path("original"))
+
+    def test_created_directory_parent_is_synced_before_applied(self):
+        root, plan, cp = self.fixture()
+        created = root / "etc/omarchy-mac"
+        etc = root / "etc"
+        etc_id = (etc.stat().st_dev, etc.stat().st_ino)
+        events = []
+        real_mkdir, real_sync, real_atomic = os.mkdir, T.os.fsync, T.atomic_json
+
+        def mkdir(path, mode=0o777):
+            events.append(("mkdir", os.path.abspath(path)))
+            return real_mkdir(path, mode)
+
+        def sync(fd):
+            info = os.fstat(fd)
+            events.append(("fsync", (info.st_dev, info.st_ino)))
+            return real_sync(fd)
+
+        def atomic(path, value):
+            if isinstance(value, dict) and value.get("status") == "APPLIED":
+                events.append(("applied",))
+            return real_atomic(path, value)
+
+        with mock.patch.object(os, "mkdir", side_effect=mkdir), \
+             mock.patch.object(T.os, "fsync", side_effect=sync), \
+             mock.patch.object(T, "atomic_json", side_effect=atomic):
+            T.apply(root, plan, cp)
+        created_id = (created.stat().st_dev, created.stat().st_ino)
+        mkdir_at = events.index(("mkdir", os.path.abspath(created)))
+        parent_sync = next(
+            index for index, event in enumerate(events)
+            if index > mkdir_at and event == ("fsync", etc_id)
+        )
+        created_sync = next(
+            index for index, event in enumerate(events)
+            if index > mkdir_at and event == ("fsync", created_id)
+        )
+        applied_at = events.index(("applied",))
+        self.assertLess(mkdir_at, parent_sync)
+        self.assertLess(parent_sync, created_sync)
+        self.assertLess(parent_sync, applied_at)
+        self.assertEqual((root / "etc/omarchy-mac/touchid-on").read_bytes(), b"consent\n")
+        T.rollback(root, cp)
+        self.assertFalse(created.exists())
+
+    def test_created_directory_parent_sync_failure_rolls_back(self):
+        root, plan, cp = self.fixture()
+        etc = root / "etc"
+        etc_id = (etc.stat().st_dev, etc.stat().st_ino)
+        failed = False
+        real_sync = T.os.fsync
+
+        def sync(fd):
+            nonlocal failed
+            info = os.fstat(fd)
+            if not failed and stat.S_ISDIR(info.st_mode) and (info.st_dev, info.st_ino) == etc_id:
+                failed = True
+                raise OSError("injected directory publication failure")
+            return real_sync(fd)
+
+        with mock.patch.object(T.os, "fsync", side_effect=sync):
+            with self.assertRaisesRegex(OSError, "directory publication"):
+                T.apply(root, plan, cp)
+        self.assertTrue(failed)
+        self.assertEqual((root / "etc/pam.d/test").read_bytes(), b"old\n")
+        self.assertFalse((root / "etc/omarchy-mac").exists())
 
 
 if __name__ == "__main__":

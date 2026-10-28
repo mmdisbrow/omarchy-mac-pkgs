@@ -250,6 +250,9 @@ def apply(root, plan, checkpoint, fail_after=None):
                 )
                 atomic_json(checkpoint / "journal.json", journal)
                 parent.mkdir(mode=0o755)
+                # The new name lives in the parent; flush that entry before
+                # anything inside the directory can be recorded as applied.
+                sync_parent(parent)
             put(path, row["after"])
             journal["last_written"] = index
             atomic_json(checkpoint / "journal.json", journal)
