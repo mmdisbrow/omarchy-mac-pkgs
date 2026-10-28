@@ -5,15 +5,18 @@ node=${OMARCHY_MAC_TOUCHID_NODE:-/dev/sep-bio}
 driver=${OMARCHY_MAC_TOUCHID_DRIVER:-/sys/bus/platform/drivers/apple_sep}
 omarchy-hw-apple-silicon || exit 0
 
+# Read one device consistently; a later device cannot fill missing facts.
+diag=
+for directory in "$driver"/*/diag; do
+  if [[ -d $directory ]]; then
+    diag=$directory
+    break
+  fi
+done
+
 attribute() {
-  local file
-  for file in "$driver"/*/diag/"$1"; do
-    if [[ -r $file ]]; then
-      tr -d '\n' <"$file"
-      return 0
-    fi
-  done
-  return 1
+  [[ -n $diag && -r $diag/$1 ]] || return 1
+  tr -d '\n' <"$diag/$1"
 }
 
 token() {
@@ -25,13 +28,8 @@ token() {
 
 keystore=$(token keystore)
 keybag=$(token keybag)
-if [[ $keystore == "open" && $keybag == "present" ]]; then
-  host_store=ready
-elif [[ -n $keystore ]]; then
-  host_store=$keystore
-else
-  host_store=missing
-fi
+host_store=$(token host_store)
+[[ -n $host_store ]] || host_store=missing
 
 xart=$(token xart)
 sensor=$(token sensor)
@@ -53,7 +51,7 @@ else
 fi
 
 ready=false
-if [[ $node_present == "true" && $host_store == "ready" && $xart == "enabled" && $sensor == "online" && $touchid == "ready" && $sensor_attach == "attached" && $refusals == "0" ]]; then
+if [[ $node_present == "true" && $keystore == "open" && $keybag == "present" && $host_store == "ready" && $xart == "enabled" && $sensor == "online" && $touchid == "ready" && $sensor_attach == "attached" && $refusals == "0" ]]; then
   if [[ $restore == "restored" || $restore == "empty" ]]; then
     if [[ $matching == "usable" || $matching == "unverified" ]]; then
       ready=true
@@ -68,5 +66,5 @@ else
   action=unsupported
 fi
 
-printf '{"action":"%s","node_present":%s,"facts":{"host_store":"%s","xart":"%s","sensor":"%s","touchid":"%s","sensor_attach":"%s","restore":"%s","matching":"%s","refusals":%s}}\n' \
-  "$action" "$node_present" "$host_store" "$xart" "$sensor" "$touchid" "$sensor_attach" "$restore" "$matching" "$refusals"
+printf '{"action":"%s","node_present":%s,"facts":{"keystore":"%s","keybag":"%s","host_store":"%s","xart":"%s","sensor":"%s","touchid":"%s","sensor_attach":"%s","restore":"%s","matching":"%s","refusals":%s}}\n' \
+  "$action" "$node_present" "$keystore" "$keybag" "$host_store" "$xart" "$sensor" "$touchid" "$sensor_attach" "$restore" "$matching" "$refusals"

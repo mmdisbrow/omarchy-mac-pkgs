@@ -71,6 +71,8 @@ class TransitionTests(unittest.TestCase):
             ],
         }
         facts = dict(
+            keystore="open",
+            keybag="present",
             host_store="ready",
             xart="enabled",
             sensor="online",

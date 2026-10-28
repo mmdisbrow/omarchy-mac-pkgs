@@ -282,6 +282,8 @@ def ready_for_transition(plan, result):
         and all(
             facts.get(k) == v
             for k, v in {
+                "keystore": "open",
+                "keybag": "present",
                 "host_store": "ready",
                 "xart": "enabled",
                 "sensor": "online",

@@ -44,7 +44,7 @@ parse() {
 
 ready_diag() {
   write_diag "$1" \
-    keystore open keybag present xart enabled sensor online touchid ready \
+    keystore open keybag present host_store ready xart enabled sensor online touchid ready \
     sensor_attach attached restore restored matching usable xart_guard_refusals 0
 }
 
@@ -53,7 +53,7 @@ mkdir -p "$driver"
 ready_diag "$driver/a.sep/diag"
 touch "$node"
 got=$(run_report | parse)
-want=$(printf '%s\n' '{"action":"ready-for-test","facts":{"host_store":"ready","matching":"usable","refusals":0,"restore":"restored","sensor":"online","sensor_attach":"attached","touchid":"ready","xart":"enabled"},"node_present":true}' | parse)
+want=$(printf '%s\n' '{"action":"ready-for-test","facts":{"keystore":"open","keybag":"present","host_store":"ready","matching":"usable","refusals":0,"restore":"restored","sensor":"online","sensor_attach":"attached","touchid":"ready","xart":"enabled"},"node_present":true}' | parse)
 [[ $got == "$want" ]] || fail 'a restored, usable sensor is ready for the transition' "$got"
 python3 -c 'import json,sys; report=json.loads(sys.argv[1]); assert type(report["facts"]["refusals"]) is int and report["facts"]["refusals"] == 0' "$got" ||
   fail 'refusals is a number, so the transition can match 0'
@@ -70,6 +70,12 @@ got=$(run_report)
 python3 -c 'import json,sys; assert json.loads(sys.argv[1])["action"] == "unsupported"' "$got" ||
   fail 'the first device is the report, even when a later one is ready' "$got"
 pass 'the first bound device is the report, and a later one neither hides nor replaces it'
+printf 'ready\n' >"$driver/a.sep/diag/touchid"
+rm "$driver/a.sep/diag/host_store"
+got=$(run_report)
+python3 -c 'import json,sys; report=json.loads(sys.argv[1]); assert report["action"] == "unsupported" and report["facts"]["host_store"] == "missing"' "$got" ||
+  fail 'a later device cannot supply a missing host-store fact for the first' "$got"
+pass 'facts are not mixed across bound devices'
 
 rm -rf "$driver"
 mkdir -p "$driver/a.sep/diag"
@@ -79,14 +85,26 @@ printf 'unverified\n' >"$driver/a.sep/diag/matching"
 got=$(run_report)
 python3 -c 'import json,sys; report=json.loads(sys.argv[1]); assert report["action"] == "ready-for-test" and report["facts"]["restore"] == "empty" and report["facts"]["matching"] == "unverified"' "$got" ||
   fail 'nothing enrolled, behind a guard that has refused nothing, stays ready for a trial' "$got"
+for value in failed unavailable missing read-only invalid; do
+  printf '%s\n' "$value" >"$driver/a.sep/diag/host_store"
+  got=$(run_report)
+  python3 -c 'import json,sys; report=json.loads(sys.argv[1]); assert report["action"] == "unsupported" and report["facts"]["host_store"] == sys.argv[2]' "$got" "$value" ||
+    fail 'an open keystore cannot hide a host-store failure' "$got"
+done
+rm "$driver/a.sep/diag/host_store"
+got=$(run_report)
+python3 -c 'import json,sys; report=json.loads(sys.argv[1]); assert report["action"] == "unsupported" and report["facts"]["host_store"] == "missing"' "$got" ||
+  fail 'a kernel without the host-store diagnostic cannot claim readiness' "$got"
+printf 'ready\n' >"$driver/a.sep/diag/host_store"
+pass 'actual host-store failures and missing diagnostics fail closed'
 printf 'closed\n' >"$driver/a.sep/diag/keystore"
 got=$(run_report)
-python3 -c 'import json,sys; report=json.loads(sys.argv[1]); assert report["action"] == "unsupported" and report["facts"]["host_store"] == "closed"' "$got" ||
+python3 -c 'import json,sys; report=json.loads(sys.argv[1]); assert report["action"] == "unsupported" and report["facts"]["keystore"] == "closed"' "$got" ||
   fail 'a closed key store is not a ready host store' "$got"
 printf 'open\n' >"$driver/a.sep/diag/keystore"
 printf 'missing\n' >"$driver/a.sep/diag/keybag"
 got=$(run_report)
-python3 -c 'import json,sys; report=json.loads(sys.argv[1]); assert report["action"] == "unsupported" and report["facts"]["host_store"] == "open"' "$got" ||
+python3 -c 'import json,sys; report=json.loads(sys.argv[1]); assert report["action"] == "unsupported" and report["facts"]["keybag"] == "missing"' "$got" ||
   fail 'an open key store without an identity keybag is not ready' "$got"
 printf 'present\n' >"$driver/a.sep/diag/keybag"
 printf '2\n' >"$driver/a.sep/diag/xart_guard_refusals"
