@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -385,6 +386,47 @@ class TransitionTests(unittest.TestCase):
         self.assertTrue(failed)
         self.assertEqual((root / "etc/pam.d/test").read_bytes(), b"old\n")
         self.assertFalse((root / "etc/omarchy-mac").exists())
+
+    def helper(self, root, body):
+        path = root / "touchid-recovery"
+        path.write_text("#!/bin/sh\n" + body)
+        path.chmod(0o755)
+        return path
+
+    def test_recovery_command_is_run_and_a_missing_helper_stops(self):
+        root, plan, _ = self.fixture()
+        missing = root / "no-such-report"
+        try:
+            T.require_recovery(plan, missing)
+        except FileNotFoundError:
+            self.fail("a missing readiness report raised FileNotFoundError")
+        except RuntimeError as error:
+            self.assertIn("not installed", str(error))
+            self.assertIn(str(missing), str(error))
+        else:
+            self.fail("a missing readiness report was accepted")
+        self.assertEqual((root / "etc/pam.d/test").read_bytes(), b"old\n")
+        marker = root / "helper-ran"
+        helper = self.helper(
+            root,
+            "printf ran > " + shlex.quote(str(marker)) + "\nprintf '%s\\n' '{\"action\":\"ready-for-test\"}'\n",
+        )
+        self.assertIsNone(T.require_recovery(plan, helper))
+        self.assertEqual(marker.read_text(), "ran")
+        self.helper(root, "printf '%s\\n' 'not-json'\n")
+        with self.assertRaisesRegex(RuntimeError, "not JSON"):
+            T.require_recovery(plan, helper)
+        self.helper(root, "exit 3\n")
+        with self.assertRaisesRegex(RuntimeError, "failed"):
+            T.require_recovery(plan, helper)
+        self.helper(root, "printf '%s\\n' '{\"action\":\"setup\"}'\n")
+        with self.assertRaisesRegex(RuntimeError, "not ready"):
+            T.require_recovery(plan, helper)
+        with mock.patch.object(T.subprocess, "run", side_effect=FileNotFoundError("gone")):
+            with self.assertRaisesRegex(RuntimeError, "could not be run") as caught:
+                T.recovery_report(helper)
+        self.assertIsInstance(caught.exception.__cause__, FileNotFoundError)
+        self.assertEqual((root / "etc/pam.d/test").read_bytes(), b"old\n")
 
     def test_distinct_checkpoint_parents_use_the_target_root_lock(self):
         root, plan, cp = self.fixture()

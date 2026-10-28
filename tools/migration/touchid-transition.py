@@ -20,6 +20,8 @@ PREFIXES = (
     "/etc/modprobe.d/",
     "/etc/omarchy-mac/",
 )
+# Installed by omarchy-mac. It prints one JSON readiness object and exits 0.
+RECOVERY_REPORT = "/usr/lib/omarchy-mac/touchid-recovery"
 
 
 def require(condition, reason):
@@ -293,6 +295,42 @@ def ready_for_transition(plan, result):
     )
 
 
+def recovery_report(command):
+    path = Path(command)
+    require(
+        path.is_file() and os.access(path, os.X_OK),
+        "omarchy-mac readiness report is not installed: " + str(path),
+    )
+    try:
+        result = subprocess.run(
+            [os.fspath(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as error:
+        raise RuntimeError(
+            "omarchy-mac readiness report could not be run: " + str(path)
+        ) from error
+    require(
+        result.returncode == 0,
+        "omarchy-mac readiness report failed: " + str(path),
+    )
+    try:
+        report = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("omarchy-mac readiness report is not JSON") from error
+    require(isinstance(report, dict), "omarchy-mac readiness report is not JSON")
+    return report
+
+
+def require_recovery(plan, command):
+    require(
+        ready_for_transition(plan, recovery_report(command)),
+        "replacement driver is not ready for the attended trial",
+    )
+
+
 def acquire_transition_lock(root):
     # One file per target root, so a second checkpoint cannot pass it.
     path = root / "run/omarchy-mac/touchid-transition.lock"
@@ -359,16 +397,7 @@ def main():
                     "required replacement differs: " + name,
                 )
             if args.operation == "apply":
-                result = subprocess.run(
-                    ["/usr/lib/omarchy-mac/touchid-recovery"],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-                require(
-                    ready_for_transition(plan, json.loads(result.stdout)),
-                    "replacement driver is not ready for the attended trial",
-                )
+                require_recovery(plan, RECOVERY_REPORT)
     if args.operation == "check":
         for row in plan["files"]:
             require(
